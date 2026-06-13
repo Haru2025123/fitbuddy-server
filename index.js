@@ -102,6 +102,29 @@ async function getLineImage(messageId) {
 
 // ===== 報告キーワード判定 =====
 const KEYWORDS = ['ジムトレ','家トレ','体重計測','プロテイン','酒なし','禁酒','スキンケア','有酸素','ランニング','ストレッチ'];
+function buildStatsMessage(stats) {
+  const h = stats.haruka, y = stats.yoichi;
+  return `📊 現在の記録
+
+🌸 晴香さん
+・ジムトレ：${h.gym}回
+・家トレ：${h.homeGym}回
+・体重計測：${h.weight}回
+・プロテイン：🔥${h.streaks?.protein||0}日連続（累計${h.protein}回）
+・禁酒：🔥${h.streaks?.noAlcohol||0}日連続（累計${h.noAlcohol}日）
+・スキンケア：🔥${h.streaks?.skincare||0}日連続
+・有酸素：${h.cardio||0}回
+
+🏋️ 陽一さん
+・ジムトレ：${y.gym}回
+・家トレ：${y.homeGym}回
+・体重計測：${y.weight}回
+・プロテイン：🔥${y.streaks?.protein||0}日連続（累計${y.protein}回）
+・禁酒：🔥${y.streaks?.noAlcohol||0}日連続（累計${y.noAlcohol}日）
+・ランニング：${y.running||0}回
+
+2人とも今日も最高だね！💪✨`;
+}
 function isReport(text) {
   return KEYWORDS.some(k => text.includes(k));
 }
@@ -154,7 +177,14 @@ app.post('/webhook', async (req, res) => {
       const userKey = await getUserKey(profile.displayName);
 
       if (event.message.type === 'text') {
-        const text = event.message.text;
+       const text = event.message.text;
+
+        if (text === '記録確認') {
+          const stats = await fbGet('stats') || defaultStats();
+          await replyLine(event.replyToken, buildStatsMessage(stats));
+          continue;
+        }
+
         if (!isReport(text)) continue; // 報告以外はスルー（夫婦の通常会話を邪魔しない）
 
         let stats = await fbGet('stats') || defaultStats();
