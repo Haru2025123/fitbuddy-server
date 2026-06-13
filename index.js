@@ -1,6 +1,6 @@
 const express = require('express');
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // 環境変数（Renderで設定する）
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
@@ -196,13 +196,17 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (event.message.type === 'image') {
-        const b64 = await getLineImage(event.message.id);
-        const content = [
-          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
-          { type: 'text', text: buildImagePrompt(name) }
-        ];
-        const reply = await callClaude(content);
-        await replyLine(event.replyToken, reply);
+        try {
+          const b64 = await getLineImage(event.message.id);
+          const content = [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+            { type: 'text', text: buildImagePrompt(name) }
+          ];
+          const reply = await callClaude(content);
+          await replyLine(event.replyToken, reply);
+        } catch(imgErr) {
+          console.error('画像処理エラー:', imgErr);
+        }
       }
     } catch(e) { console.error(e); }
   }
