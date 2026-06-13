@@ -175,6 +175,7 @@ app.post('/webhook', async (req, res) => {
       const profile = await getProfile(userId, groupId);
       const name = profile.displayName || 'あなた';
       const userKey = await getUserKey(profile.displayName);
+      console.log(`【ユーザーID確認】名前: ${name} / userId: ${userId}`);
 
       if (event.message.type === 'text') {
        const text = event.message.text;
