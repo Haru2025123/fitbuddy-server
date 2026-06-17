@@ -1,8 +1,12 @@
+// ======================================================================
+// 「ふたりの健康便り」LINEサーバー  index.js
+// 自動ペアリング機能つき版
+// ======================================================================
+
 const express = require('express');
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// 環境変数（Renderで設定する）
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const FIREBASE_URL = 'https://routine-app-88035-default-rtdb.asia-southeast1.firebasedatabase.app';
@@ -14,6 +18,9 @@ async function fbGet(path) {
 }
 async function fbSet(path, data) {
   await fetch(`${FIREBASE_URL}/${path}.json`, { method: 'PUT', body: JSON.stringify(data) });
+}
+async function fbDelete(path) {
+  await fetch(`${FIREBASE_URL}/${path}.json`, { method: 'DELETE' });
 }
 
 // ===== 記録更新 =====
@@ -40,7 +47,7 @@ function updateRecord(stats, user, text) {
   return stats;
 }
 
-// ===== ユーザー判定（LINE表示名から） =====
+// ===== ユーザー判定 =====
 async function getUserKey(profileName) {
   if (!profileName) return 'haruka';
   if (profileName.includes('晴香') || profileName.toLowerCase().includes('haru')) return 'haruka';
@@ -76,7 +83,7 @@ async function callClaude(content) {
   return data.content?.[0]?.text || '最高です！続けてね💪';
 }
 
-// ===== LINE返信 =====
+// ===== LINE返信（reply）=====
 async function replyLine(replyToken, text) {
   await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
@@ -86,6 +93,44 @@ async function replyLine(replyToken, text) {
     },
     body: JSON.stringify({
       replyToken,
+      messages: [{ type: 'text', text: text.substring(0, 4900) }]
+    })
+  });
+}
+
+// ===== LINE返信（ボタンつきメニュー）=====
+async function replyLineMenu(replyToken, text) {
+  await fetch('https://api.line.me/v2/bot/message/reply', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${LINE_TOKEN}`
+    },
+    body: JSON.stringify({
+      replyToken,
+      messages: [{
+        type: 'text',
+        text: text.substring(0, 4900),
+        quickReply: {
+          items: [
+            { type: 'action', action: { type: 'message', label: '🆕 新規で合言葉を作る', text: '新規' } }
+          ]
+        }
+      }]
+    })
+  });
+}
+
+// ===== LINEプッシュ（push＝相手への通知）=====
+async function pushLine(userId, text) {
+  await fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${LINE_TOKEN}`
+    },
+    body: JSON.stringify({
+      to: userId,
       messages: [{ type: 'text', text: text.substring(0, 4900) }]
     })
   });
@@ -129,6 +174,22 @@ function isReport(text) {
   return KEYWORDS.some(k => text.includes(k));
 }
 
+// ===== ペアリング用：4桁の合言葉を作る =====
+function genCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+function welcomeText(name) {
+  return `${name}さん、「ふたりの健康便り」へようこそ！🌸
+
+パートナーと記録を共有するための設定をします。
+
+▼ はじめての方
+下の「🆕 新規で合言葉を作る」ボタンを押してください。4桁の合言葉が発行されます。
+
+▼ パートナーから合言葉を聞いた方
+その4桁の数字をこのトークに送ってください。`;
+}
+
 // ===== プロンプト =====
 function buildReportPrompt(name, text, stats, userKey) {
   const r = stats[userKey];
@@ -164,36 +225,89 @@ function buildImagePrompt(name) {
 
 // ===== Webhook =====
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // すぐ200を返す
+  res.sendStatus(200);
 
   const events = req.body.events || [];
   for (const event of events) {
     try {
+      // ▼ 友だち追加されたとき → ようこそメッセージ＋ペア設定メニュー
+      if (event.type === 'follow') {
+        const userId = event.source.userId;
+        const profile = await getProfile(userId, null);
+        const name = profile.displayName || 'あなた';
+        await fbSet(`users/${userId}`, { name });
+        await replyLineMenu(event.replyToken, welcomeText(name));
+        continue;
+      }
+
       if (event.type !== 'message') continue;
       const groupId = event.source.groupId;
       const userId = event.source.userId;
       const profile = await getProfile(userId, groupId);
       const name = profile.displayName || 'あなた';
       const userKey = await getUserKey(profile.displayName);
-      console.log(`【ユーザーID確認】名前: ${name} / userId: ${userId}`);
+      await fbSet(`users/${userId}`, { name });
 
       if (event.message.type === 'text') {
-       const text = event.message.text;
+        const text = event.message.text.trim();
 
+        // ▼ ペア設定メニューを出す（既に友だちの人用）
+        if (text === 'ペア設定' || text === '設定') {
+          await replyLineMenu(event.replyToken, welcomeText(name));
+          continue;
+        }
+
+        // ▼ 「新規」→ 合言葉を発行
+        if (text === '新規') {
+          const code = genCode();
+          await fbSet(`pending/${code}`, { userId, name });
+          await replyLine(event.replyToken,
+            `🔑 あなたの合言葉は【 ${code} 】です。\n\nこの4桁をパートナーに伝えてください。\nパートナーがこの番号をこのトークに送ると、ペア登録が完了します✨`);
+          continue;
+        }
+
+        // ▼ 4桁の合言葉が送られた → ペア成立
+        if (/^\d{4}$/.test(text)) {
+          const pending = await fbGet(`pending/${text}`);
+          if (pending && pending.userId && pending.userId !== userId) {
+            const partnerId = pending.userId;
+            const partnerName = pending.name || 'パートナー';
+            await fbSet(`pairs/${userId}`, { partnerId, name });
+            await fbSet(`pairs/${partnerId}`, { partnerId: userId, name: partnerName });
+            await fbDelete(`pending/${text}`);
+            await replyLine(event.replyToken, `🎉 ${partnerName}さんとのペア登録が完了しました！\nこれからお互いの報告がここに届きます💪✨`);
+            await pushLine(partnerId, `🎉 ${name}さんとのペア登録が完了しました！\nこれからお互いの報告がここに届きます💪✨`);
+          } else if (pending && pending.userId === userId) {
+            await replyLine(event.replyToken, `それは自分用の合言葉です😊\nパートナーに伝えて、パートナーから送ってもらってね。`);
+          } else {
+            await replyLine(event.replyToken, `その合言葉【${text}】は見つかりませんでした。\n番号をもう一度確認してね。`);
+          }
+          continue;
+        }
+
+        // ▼ 記録確認
         if (text === '記録確認') {
           const stats = await fbGet('stats') || defaultStats();
           await replyLine(event.replyToken, buildStatsMessage(stats));
           continue;
         }
 
-        if (!isReport(text)) continue; // 報告以外はスルー（夫婦の通常会話を邪魔しない）
+        // ▼ 報告以外はスルー
+        if (!isReport(text)) continue;
 
+        // ▼ 報告 → 記録更新＋AI返信
         let stats = await fbGet('stats') || defaultStats();
         stats = updateRecord(stats, userKey, text);
         await fbSet('stats', stats);
 
         const reply = await callClaude(buildReportPrompt(name, text, stats, userKey));
         await replyLine(event.replyToken, reply);
+
+        // ▼ パートナーへ通知
+        const pair = await fbGet(`pairs/${userId}`);
+        if (pair && pair.partnerId) {
+          await pushLine(pair.partnerId, `📣 ${name}さんが【${text}】を報告しました！🎉\nお互い今日も頑張ってるね💪✨`);
+        }
       }
 
       if (event.message.type === 'image') {
