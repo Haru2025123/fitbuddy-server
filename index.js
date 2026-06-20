@@ -1,6 +1,6 @@
 // ======================================================================
 // 「ふたりの健康便り」LINEサーバー  index.js
-// 自動ペアリング機能つき版
+// 自動ペアリング機能つき版 ＋ 連続報告まとめ機能（3秒バッチ）
 // ======================================================================
 
 const express = require('express');
@@ -10,6 +10,9 @@ app.use(express.json({ limit: '10mb' }));
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const FIREBASE_URL = 'https://routine-app-88035-default-rtdb.asia-southeast1.firebasedatabase.app';
+
+// 連続報告をまとめる待ち時間（ミリ秒）。3秒。
+const BATCH_WAIT_MS = 3000;
 
 // ===== Firebase =====
 async function fbGet(path) {
@@ -190,7 +193,7 @@ function welcomeText(name) {
 その4桁の数字をこのトークに送ってください。`;
 }
 
-// ===== プロンプト =====
+// ===== プロンプト（1件用・複数件用 兼用）=====
 function buildReportPrompt(name, text, stats, userKey) {
   const r = stats[userKey];
   const ctx = userKey === 'haruka'
@@ -202,6 +205,7 @@ ${ctx}
 今回の報告：「${text}」
 ルール：
 - ${name}さんの名前を必ず呼ぶ
+- 今回の報告が複数ある場合は、それらをまとめて1つのメッセージで褒める（報告ごとに分けて書かない）
 - 毎回まったく違うユニークな比喩・ユーモアを使う（桜、ロケット、伝説の戦士、神話、宇宙、料理、動物、映画など）
 - 連続記録・累計が増えたら具体的な数字を出して大げさに褒める
 - トレーニングやダイエットに役立つ具体的なアドバイスや豆知識を1つ入れる
@@ -222,6 +226,61 @@ function buildImagePrompt(name) {
 - 最後にモチベーションが上がる熱い応援メッセージで締める
 - 絵文字を5個以上使う
 - 最低でも10文以上書く`;
+}
+
+// ======================================================================
+// ★ 連続報告まとめ機能（3秒バッチ）
+// ----------------------------------------------------------------------
+// 報告ボタンを連続で押したとき、3秒間ためてから
+// ・本人へAI返信を1通にまとめる
+// ・パートナーへの通知も1通にまとめる
+// ======================================================================
+const reportBuffers = {}; // userIdごとに一時保管
+
+function queueReport(userId, name, userKey, text, replyToken) {
+  // この人のバッファがまだ無ければ作る
+  if (!reportBuffers[userId]) {
+    reportBuffers[userId] = { name, userKey, texts: [], replyToken, timer: null };
+  }
+  const buf = reportBuffers[userId];
+  // 最新の情報で更新（replyTokenは毎回いちばん新しいものを使う）
+  buf.name = name;
+  buf.userKey = userKey;
+  buf.replyToken = replyToken;
+  buf.texts.push(text);
+
+  // 既存のタイマーをリセットして、3秒後にまとめて処理
+  if (buf.timer) clearTimeout(buf.timer);
+  buf.timer = setTimeout(() => { flushReports(userId); }, BATCH_WAIT_MS);
+}
+
+async function flushReports(userId) {
+  const buf = reportBuffers[userId];
+  if (!buf) return;
+  delete reportBuffers[userId]; // 先に取り出して消す（多重実行を防ぐ）
+
+  try {
+    const name = buf.name;
+    const userKey = buf.userKey;
+    const texts = buf.texts;
+    // 「ジムトレ完了・体重計測完了」のように1つにまとめる
+    const combined = texts.join('・');
+
+    // 最新の記録を取得してAI返信を作る
+    const stats = await fbGet('stats') || defaultStats();
+    const reply = await callClaude(buildReportPrompt(name, combined, stats, userKey));
+
+    // 本人へ返信（3秒以内なのでreplyTokenが有効）
+    await replyLine(buf.replyToken, reply);
+
+    // パートナーへまとめて通知
+    const pair = await fbGet(`pairs/${userId}`);
+    if (pair && pair.partnerId) {
+      await pushLine(pair.partnerId, `📣 ${name}さんが【${combined}】を報告しました！🎉\nお互い今日も頑張ってるね💪✨`);
+    }
+  } catch(e) {
+    console.error('まとめ処理エラー:', e);
+  }
 }
 
 // ===== Webhook =====
@@ -296,19 +355,13 @@ app.post('/webhook', async (req, res) => {
         // ▼ 報告以外はスルー
         if (!isReport(text)) continue;
 
-        // ▼ 報告 → 記録更新＋AI返信
+        // ▼ 報告 → 記録だけ先に更新（数字をすぐ正確にする）
         let stats = await fbGet('stats') || defaultStats();
         stats = updateRecord(stats, userKey, text);
         await fbSet('stats', stats);
 
-        const reply = await callClaude(buildReportPrompt(name, text, stats, userKey));
-        await replyLine(event.replyToken, reply);
-
-        // ▼ パートナーへ通知
-        const pair = await fbGet(`pairs/${userId}`);
-        if (pair && pair.partnerId) {
-          await pushLine(pair.partnerId, `📣 ${name}さんが【${text}】を報告しました！🎉\nお互い今日も頑張ってるね💪✨`);
-        }
+        // ▼ AI返信とパートナー通知は3秒バッチにためる
+        queueReport(userId, name, userKey, text, event.replyToken);
       }
 
       if (event.message.type === 'image') {
