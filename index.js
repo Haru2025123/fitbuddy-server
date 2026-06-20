@@ -1,6 +1,6 @@
 // ======================================================================
 // 「ふたりの健康便り」LINEサーバー  index.js
-// 自動ペアリング機能つき版 ＋ 連続報告まとめ機能（3秒バッチ）
+// 自動ペアリング機能つき版 ＋ 連続報告まとめ機能（3秒バッチ）＋ 食事写真の要約転送
 // ======================================================================
 
 const express = require('express');
@@ -228,6 +228,19 @@ function buildImagePrompt(name) {
 - 最低でも10文以上書く`;
 }
 
+// パートナーへの転送用：短い要約バージョン
+function buildImageSummaryPrompt(name) {
+  return `あなたは栄養学の専門家です。この食事写真を見て、${name}さんのパートナーに知らせる短い要約を日本語で書いてください。
+
+【ルール】
+- 必ず2〜3文の短い要約にする（長文は禁止）
+- 写っている料理名を特定する
+- 主な栄養素（たんぱく質・野菜など）を一言で触れる
+- 推定カロリーを書く
+- 絵文字を1〜2個使う
+例：「サムギョプサルですね🍖 豚肉中心の高たんぱくメニューで、野菜もしっかり。推定約700kcalです✨」`;
+}
+
 // ======================================================================
 // ★ 連続報告まとめ機能（3秒バッチ）
 // ----------------------------------------------------------------------
@@ -367,12 +380,28 @@ app.post('/webhook', async (req, res) => {
       if (event.message.type === 'image') {
         try {
           const b64 = await getLineImage(event.message.id);
+          // 本人へ：詳しい長文の栄養解析（今まで通り）
           const content = [
             { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
             { type: 'text', text: buildImagePrompt(name) }
           ];
           const reply = await callClaude(content);
           await replyLine(event.replyToken, reply);
+
+          // パートナーへ：短い要約だけ転送
+          const pair = await fbGet(`pairs/${userId}`);
+          if (pair && pair.partnerId) {
+            try {
+              const summaryContent = [
+                { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+                { type: 'text', text: buildImageSummaryPrompt(name) }
+              ];
+              const summary = await callClaude(summaryContent);
+              await pushLine(pair.partnerId, `📣 ${name}さんが食事を記録しました！🍽\n\n${summary}`);
+            } catch(sumErr) {
+              console.error('食事要約の転送エラー:', sumErr);
+            }
+          }
         } catch(imgErr) {
           console.error('画像処理エラー:', imgErr);
         }
