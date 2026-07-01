@@ -277,7 +277,14 @@ async function flushReports(userId) {
     const combined = texts.join('・');
 
     // 最新の記録を取得してAI返信を作る
-    const stats = await fbGet('stats') || defaultStats();
+    let stats = await fbGet('stats') || defaultStats();
+    // 記録が欠けていたらデフォルトで補う（エラー防止）
+    if (!stats.haruka || !stats.yoichi) {
+      stats = Object.assign(defaultStats(), stats);
+    }
+    if (!stats[userKey]) {
+      stats[userKey] = defaultStats()[userKey];
+    }
     const reply = await callClaude(buildReportPrompt(name, combined, stats, userKey));
 
     // 本人へ返信（3秒以内なのでreplyTokenが有効）
